@@ -47,15 +47,15 @@ const loginLimiter = rateLimit({
   message: { success: false, message: "Too many attempts. Please try again later." },
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.use("/api/participants/register", registerLimiter);
-app.use("/api/spin", spinLimiter);
-app.use("/api/admin/login", loginLimiter);
+app.use("/participants/register", registerLimiter);
+app.use("/spin", spinLimiter);
+app.use("/admin/login", loginLimiter);
 
-app.use("/api/participants", participantsRouter);
-app.use("/api", spinRouter);
-app.use("/api/admin", adminRouter);
+app.use("/participants", participantsRouter);
+app.use("/", spinRouter);
+app.use("/admin", adminRouter);
 
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Not found." });

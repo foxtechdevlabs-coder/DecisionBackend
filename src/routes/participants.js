@@ -2,6 +2,9 @@ import { Router } from "express";
 import { query } from "../db.js";
 import { normalizePhone, isValidPhone } from "../utils/phone.js";
 import { signParticipantToken } from "../middleware/auth.js";
+import { generateCouponCode } from "../utils/coupon.js";
+
+const MAX_COUPON_ATTEMPTS = 8;
 
 export const participantsRouter = Router();
 
@@ -43,6 +46,7 @@ participantsRouter.post("/register", async (req, res) => {
   const departmentOther = cleanName(req.body?.departmentOther);
   const year = String(req.body?.year || "").trim();
   const collegeName = cleanName(req.body?.collegeName);
+  const campaignType = req.body?.campaignType === "NORMAL" ? "NORMAL" : "INSTAGRAM";
 
   if (!name || name.length < 2) {
     return res.status(400).json({ success: false, message: "Please enter your full name." });
@@ -75,6 +79,7 @@ participantsRouter.post("/register", async (req, res) => {
           alreadySpun: true,
           message: "You've already claimed your offer! You have already participated in this offer campaign.",
           offer: toPublicOffer(existing),
+          couponCode: existing.coupon_code,
         });
       }
       // Registered previously but hasn't spun yet (e.g. refreshed the page) — resume, don't duplicate.
@@ -84,40 +89,70 @@ participantsRouter.post("/register", async (req, res) => {
         token: signParticipantToken(existing.id),
         canSpin: true,
         resumed: true,
+        couponCode: existing.coupon_code,
       });
     }
 
-    // ON CONFLICT DO NOTHING makes the duplicate-phone race safe without a
-    // try/catch: if another request inserted the same phone number first,
-    // this returns zero rows instead of erroring, and we just re-fetch it.
-    const { rows } = await query(
-      `INSERT INTO participants (name, phone, normalized_phone, department, department_other, year, college_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (normalized_phone) DO NOTHING
-       RETURNING *`,
-      [name, phoneRaw, normalizedPhone, department, department === "Other" ? departmentOther : null, year, collegeName]
-    );
+    // Coupon codes are short (FT + 4 chars = ~1.1M combinations) so a
+    // collision is rare but real once volume grows — retry with a fresh
+    // code on a coupon_code-specific unique violation rather than failing.
+    // ON CONFLICT (normalized_phone) DO NOTHING separately makes the
+    // duplicate-phone race safe: if another request inserted the same
+    // phone number first, this returns zero rows instead of erroring, and
+    // we just re-fetch it instead of retrying.
+    for (let attempt = 0; attempt < MAX_COUPON_ATTEMPTS; attempt++) {
+      const couponCode = generateCouponCode();
+      try {
+        const { rows } = await query(
+          `INSERT INTO participants (name, phone, normalized_phone, department, department_other, year, college_name, coupon_code, campaign_type)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (normalized_phone) DO NOTHING
+           RETURNING *`,
+          [
+            name,
+            phoneRaw,
+            normalizedPhone,
+            department,
+            department === "Other" ? departmentOther : null,
+            year,
+            collegeName,
+            couponCode,
+            campaignType,
+          ]
+        );
 
-    if (rows.length === 0) {
-      const raceExisting = await findExisting(normalizedPhone);
-      return res.status(200).json({
-        success: false,
-        alreadyParticipated: true,
-        alreadySpun: Boolean(raceExisting?.has_spun),
-        message: raceExisting?.has_spun
-          ? "You've already claimed your offer! You have already participated in this offer campaign."
-          : "You're already registered for this campaign.",
-        offer: toPublicOffer(raceExisting),
-      });
+        if (rows.length === 0) {
+          const raceExisting = await findExisting(normalizedPhone);
+          return res.status(200).json({
+            success: false,
+            alreadyParticipated: true,
+            alreadySpun: Boolean(raceExisting?.has_spun),
+            message: raceExisting?.has_spun
+              ? "You've already claimed your offer! You have already participated in this offer campaign."
+              : "You're already registered for this campaign.",
+            offer: toPublicOffer(raceExisting),
+            couponCode: raceExisting?.coupon_code,
+          });
+        }
+
+        const created = rows[0];
+        return res.status(201).json({
+          success: true,
+          participantId: created.id,
+          token: signParticipantToken(created.id),
+          canSpin: true,
+          couponCode: created.coupon_code,
+        });
+      } catch (err) {
+        if (err.code === "23505" && String(err.constraint).includes("coupon_code")) {
+          continue; // collision on the coupon code itself — try a new one
+        }
+        throw err;
+      }
     }
 
-    const created = rows[0];
-    return res.status(201).json({
-      success: true,
-      participantId: created.id,
-      token: signParticipantToken(created.id),
-      canSpin: true,
-    });
+    console.error("[participants/register] exhausted coupon code attempts");
+    return res.status(500).json({ success: false, message: "Something went wrong. Please try again." });
   } catch (err) {
     console.error("[participants/register] unexpected error", err);
     return res.status(500).json({ success: false, message: "Something went wrong. Please try again." });

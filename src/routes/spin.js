@@ -25,14 +25,10 @@ spinRouter.get("/offers", async (_req, res) => {
   res.json({ success: true, offers: wheel });
 });
 
-function pickWeighted(offers) {
-  const totalWeight = offers.reduce((sum, o) => sum + o.weight, 0);
-  let ticket = Math.random() * totalWeight;
-  for (const offer of offers) {
-    ticket -= offer.weight;
-    if (ticket <= 0) return offer;
-  }
-  return offers[offers.length - 1];
+// Equal probability across every active offer — no weighting. Each of N
+// active offers has exactly a 1/N chance, decided here on the server.
+function pickEqualChance(offers) {
+  return offers[Math.floor(Math.random() * offers.length)];
 }
 
 // POST /api/spin — server determines the winner; frontend only animates to it.
@@ -76,7 +72,7 @@ spinRouter.post("/spin", requireParticipant, async (req, res) => {
 
       const { rows: offers } = await client.query(
         `SELECT * FROM offers
-         WHERE is_active = TRUE AND weight > 0 AND (max_claims IS NULL OR claims_count < max_claims)
+         WHERE is_active = TRUE AND (max_claims IS NULL OR claims_count < max_claims)
          ORDER BY id
          FOR UPDATE`
       );
@@ -88,7 +84,7 @@ spinRouter.post("/spin", requireParticipant, async (req, res) => {
         };
       }
 
-      const winner = pickWeighted(offers);
+      const winner = pickEqualChance(offers);
 
       await client.query(
         `UPDATE participants

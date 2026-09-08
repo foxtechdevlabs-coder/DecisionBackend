@@ -91,6 +91,50 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_participants_created_at ON participants(created_at);
   CREATE INDEX IF NOT EXISTS idx_participants_department ON participants(department);
+
+  -- Campaign A (Instagram wheel) / Campaign B (offline games -> voucher
+  -- tier) both hang off the same participants row via coupon_code — added
+  -- as a plain nullable column (Postgres allows ADD COLUMN IF NOT EXISTS
+  -- directly, no rebuild needed) with a separate unique index so
+  -- uniqueness is DB-enforced.
+  ALTER TABLE participants ADD COLUMN IF NOT EXISTS coupon_code TEXT;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_participants_coupon_code ON participants(coupon_code);
+
+  -- Which campaign this participant entered through (set at registration,
+  -- e.g. via /?campaign=normal), and the voucher tier staff assign after
+  -- the 9 games are played offline. There is deliberately no online game
+  -- tracking table — the games happen in person; the admin records only
+  -- the resulting tier (see POST /api/admin/participants/:id/tier).
+  ALTER TABLE participants ADD COLUMN IF NOT EXISTS campaign_type TEXT DEFAULT 'INSTAGRAM' CHECK (campaign_type IN ('INSTAGRAM', 'NORMAL'));
+  ALTER TABLE participants ADD COLUMN IF NOT EXISTS voucher_tier TEXT CHECK (voucher_tier IN ('SILVER', 'GOLD', 'PLATINUM'));
+
+  -- Admin-configurable reward pool per voucher tier (plain text rewards,
+  -- e.g. "KitKat + Pen", "One Week Free Internship", "₹500").
+  CREATE TABLE IF NOT EXISTS voucher_prizes (
+    id SERIAL PRIMARY KEY,
+    tier TEXT NOT NULL CHECK (tier IN ('SILVER', 'GOLD', 'PLATINUM')),
+    reward_text TEXT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  -- One row per admin-generated voucher QR. The reward is picked and
+  -- recorded by the backend only at scratch/redemption time, never chosen
+  -- by the frontend.
+  CREATE TABLE IF NOT EXISTS vouchers (
+    id SERIAL PRIMARY KEY,
+    voucher_code TEXT NOT NULL UNIQUE,
+    tier TEXT NOT NULL CHECK (tier IN ('SILVER', 'GOLD', 'PLATINUM')),
+    status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE', 'REDEEMED')),
+    reward_id INTEGER REFERENCES voucher_prizes(id),
+    reward_text TEXT,
+    redeemed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_vouchers_tier ON vouchers(tier);
+  CREATE INDEX IF NOT EXISTS idx_vouchers_status ON vouchers(status);
 `;
 
 const SEED_OFFERS = [
@@ -113,6 +157,33 @@ async function seedOffers() {
         `INSERT INTO offers (name, discount_percentage, weight, is_active) VALUES ($1, $2, $3, TRUE)`,
         [offer.name, offer.discount_percentage, offer.weight]
       );
+    }
+  });
+}
+
+const SEED_VOUCHER_PRIZES = [
+  { tier: "SILVER", reward_text: "Milky Bar + Pen" },
+  { tier: "SILVER", reward_text: "Dairy Milk + Pen" },
+  { tier: "SILVER", reward_text: "Snickers + Pen" },
+  { tier: "SILVER", reward_text: "KitKat + Pen" },
+  { tier: "SILVER", reward_text: "5 Star + Pen" },
+  { tier: "GOLD", reward_text: "One Week Free Internship" },
+  { tier: "GOLD", reward_text: "All Courses 5% Off" },
+  { tier: "PLATINUM", reward_text: "₹100" },
+  { tier: "PLATINUM", reward_text: "₹200" },
+  { tier: "PLATINUM", reward_text: "₹500" },
+];
+
+async function seedVoucherPrizes() {
+  const { rows } = await query("SELECT COUNT(*)::int AS c FROM voucher_prizes");
+  if (rows[0].c > 0) return;
+
+  await withTransaction(async (client) => {
+    for (const prize of SEED_VOUCHER_PRIZES) {
+      await client.query("INSERT INTO voucher_prizes (tier, reward_text) VALUES ($1, $2)", [
+        prize.tier,
+        prize.reward_text,
+      ]);
     }
   });
 }
@@ -140,5 +211,6 @@ async function seedAdmin() {
 export async function initDb() {
   await query(SCHEMA_SQL);
   await seedOffers();
+  await seedVoucherPrizes();
   await seedAdmin();
 }

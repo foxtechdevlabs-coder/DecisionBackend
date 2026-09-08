@@ -7,6 +7,8 @@ import { initDb } from "./db.js";
 import { participantsRouter } from "./routes/participants.js";
 import { spinRouter } from "./routes/spin.js";
 import { adminRouter } from "./routes/admin.js";
+import { couponsRouter } from "./routes/coupons.js";
+import { vouchersRouter } from "./routes/vouchers.js";
 
 if (!process.env.JWT_SECRET) {
   console.error("FATAL: JWT_SECRET is not set. Copy .env.example to .env and configure it.");
@@ -47,15 +49,38 @@ const loginLimiter = rateLimit({
   message: { success: false, message: "Too many attempts. Please try again later." },
 });
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+// Coupon codes (FT + 4 chars) and voucher codes are short enough to be
+// guessable given unlimited attempts — these limiters are the mitigation,
+// on top of the codes themselves never being predictable/sequential.
+const couponLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many attempts. Please try again later." },
+});
 
-app.use("/participants/register", registerLimiter);
-app.use("/spin", spinLimiter);
-app.use("/admin/login", loginLimiter);
+const voucherRedeemLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many attempts. Please try again later." },
+});
 
-app.use("/participants", participantsRouter);
-app.use("/", spinRouter);
-app.use("/admin", adminRouter);
+app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
+app.use("/api/participants/register", registerLimiter);
+app.use("/api/spin", spinLimiter);
+app.use("/api/admin/login", loginLimiter);
+app.use("/api/coupons/validate", couponLimiter);
+app.use(/^\/api\/vouchers\/[^/]+\/redeem$/, voucherRedeemLimiter);
+
+app.use("/api/participants", participantsRouter);
+app.use("/api", spinRouter);
+app.use("/api/admin", adminRouter);
+app.use("/api/coupons", couponsRouter);
+app.use("/api/vouchers", vouchersRouter);
 
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Not found." });
